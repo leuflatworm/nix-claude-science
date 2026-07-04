@@ -140,22 +140,38 @@
               --ro-bind-try /etc/static /etc/static
             )
 
-            # The app builds a fresh /etc with `--tmpfs /etc`, which shadows any
-            # /etc bind we merely PREPEND. But it terminates bwrap options with
-            # a literal `--` before the command, so we splice our binds in right
-            # before that `--`: they then apply AFTER the app's --tmpfs /etc and
-            # win. If no `--` is present we fall back to prepending.
-            args=()
-            spliced=0
+            # Strategy differs per call:
+            #  * The REAL sandbox exec rebuilds /etc with `--tmpfs /etc`, which
+            #    shadows any /etc bind we prepend -- so for that call we splice
+            #    our binds in just before the `--` option terminator, landing
+            #    them after the app's own binds where they win.
+            #  * Every other call -- notably the `--disable-userns` capability
+            #    PROBE, whose root is a read-only `--ro-bind / /` into which a
+            #    late mountpoint cannot be created (fails "No such file or
+            #    directory") -- must NOT be spliced. Prepending is safe there:
+            #    the binds land in the fresh newroot before the app's root bind
+            #    and are simply shadowed, never failing. So gate the splice on
+            #    the presence of `--tmpfs /etc`, and prepend otherwise.
+            tmpfs_etc=0
+            prev=
             for a in "$@"; do
-              if [ "$spliced" = 0 ] && [ "$a" = "--" ]; then
-                args+=( "''${extra[@]}" -- )
-                spliced=1
-              else
-                args+=( "$a" )
-              fi
+              if [ "$prev" = "--tmpfs" ] && [ "$a" = "/etc" ]; then tmpfs_etc=1; break; fi
+              prev="$a"
             done
-            if [ "$spliced" = 0 ]; then
+
+            if [ "$tmpfs_etc" = 1 ]; then
+              args=()
+              spliced=0
+              for a in "$@"; do
+                if [ "$spliced" = 0 ] && [ "$a" = "--" ]; then
+                  args+=( "''${extra[@]}" -- )
+                  spliced=1
+                else
+                  args+=( "$a" )
+                fi
+              done
+              if [ "$spliced" = 0 ]; then args=( "''${extra[@]}" "$@" ); fi
+            else
               args=( "''${extra[@]}" "$@" )
             fi
 
