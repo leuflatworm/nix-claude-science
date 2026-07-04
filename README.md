@@ -39,13 +39,13 @@ Linux currently is. `autoPatchelfHook` is sufficient to make it run.
 
 ```bash
 # Run without installing
-nix run github:<you>/nix-claude-science
+nix run github:leuflatworm/nix-claude-science
 
 # Install into your profile
-nix profile install github:<you>/nix-claude-science
+nix profile install github:leuflatworm/nix-claude-science
 
 # Or add to a flake-based NixOS/Home Manager config
-inputs.claude-science.url = "github:<you>/nix-claude-science";
+inputs.claude-science.url = "github:leuflatworm/nix-claude-science";
 # ... then reference inputs.claude-science.packages.${system}.default
 ```
 
