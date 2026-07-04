@@ -108,9 +108,27 @@
           # there first, to diagnose cases where a different bind position or
           # path is needed.
           bwrapShim = pkgs.writeShellScriptBin "bwrap" ''
-            if [ -n "''${CLAUDE_SCIENCE_BWRAP_LOG:-}" ]; then
-              { printf '%q ' "$@"; echo; } >> "$CLAUDE_SCIENCE_BWRAP_LOG" 2>/dev/null || true
+            # Always record the raw invocation to a fixed path (env can
+            # override) so the sandbox construction can be inspected even when
+            # the app clears our environment before spawning us. Best-effort.
+            _log="''${CLAUDE_SCIENCE_BWRAP_LOG:-/tmp/claude-science-bwrap.log}"
+            { printf '%q ' "$@"; printf '\n'; } >> "$_log" 2>/dev/null || true
+
+            # Best-effort CA trust for libcurl / micromamba / node: point them
+            # at the resolved cacert bundle in /nix/store (bound below and
+            # world-readable), bypassing NixOS's /etc/ssl symlink chain which
+            # dangles inside the sandbox. This works only if the app does not
+            # --clearenv when spawning bwrap; it's harmless otherwise, and the
+            # log above lets us switch to positional --setenv injection if a
+            # --clearenv is present.
+            _ca="$(readlink -f /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true)"
+            if [ -n "$_ca" ]; then
+              export CURL_CA_BUNDLE="''${CURL_CA_BUNDLE:-$_ca}"
+              export SSL_CERT_FILE="''${SSL_CERT_FILE:-$_ca}"
+              export NIX_SSL_CERT_FILE="''${NIX_SSL_CERT_FILE:-$_ca}"
+              export NODE_EXTRA_CA_CERTS="''${NODE_EXTRA_CA_CERTS:-$_ca}"
             fi
+
             exec ${pkgs.bubblewrap}/bin/bwrap \
               --ro-bind /nix/store /nix/store \
               --ro-bind-try /run/current-system /run/current-system \
