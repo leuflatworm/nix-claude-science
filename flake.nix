@@ -25,7 +25,16 @@
     flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-darwin" "x86_64-darwin" ]
       (system:
         let
-          pkgs = import nixpkgs { inherit system; };
+          # allowUnfree is set on this flake's own nixpkgs instance so the
+          # package evaluates for anyone who pulls it, without them needing
+          # NIXPKGS_ALLOW_UNFREE / --impure or a global allowUnfree in their
+          # own config. Consuming this flake IS the opt-in to the unfree
+          # upstream binary; this instance only ever builds claude-science, so
+          # there is no collateral effect on the consumer's other packages.
+          pkgs = import nixpkgs {
+            inherit system;
+            config.allowUnfree = true;
+          };
           lib = pkgs.lib;
 
           # Updated by scripts/update.sh (see .github/workflows/update.yml),
