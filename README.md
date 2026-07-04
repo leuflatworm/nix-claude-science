@@ -11,6 +11,48 @@ scientific AI workbench (released as a beta on 2026-06-30).
 > not alter, extract, or reimplement any part of Claude Science's
 > authentication, networking, or sandboxing behavior.
 
+## ⚠️ Current status: upstream `linux-x64` release is broken (as of 2026-07-04)
+
+**The `operon-linux-x64` binary Anthropic currently publishes for
+`claude-science` v0.1.15 is the raw [Bun](https://bun.sh) runtime, not the
+Claude Science CLI.** Running it just drops you into Bun's own command line:
+
+```console
+$ claude-science --version
+1.3.13                         # <- Bun's version, not claude-science's
+$ claude-science --help
+Bun is a fast JavaScript runtime, package manager, bundler, and test runner. ...
+$ claude-science login
+Uh-oh. bun login is a subcommand reserved for future use by Bun.
+```
+
+`claude-science` is a Bun-compiled single-file executable. In a correct build,
+the app launcher is embedded into the Bun binary; here it isn't, so Bun falls
+through to its own argument parser. This is a **known upstream `area:packaging`
+regression** that has hit the sibling [Claude Code](https://github.com/anthropics/claude-code)
+project more than once — the binary boots into Bun's CLI instead of the app:
+
+- [anthropics/claude-code#28325](https://github.com/anthropics/claude-code/issues/28325)
+  — Linux, `claude` 2.1.52 "only runs bun" (worked in 2.1.51)
+- [anthropics/claude-code#63402](https://github.com/anthropics/claude-code/issues/63402)
+  — auto-update shipped a binary that boots into Bun's CLI (`InternalName: bun`)
+
+**This is an upstream defect, not a bug in this flake** — the fetch, checksum
+verification, and patching are all correct; the artifact upstream serves is
+simply the wrong binary. To avoid silently installing a non-functional command,
+`flake.nix`'s `installCheckPhase` **detects the raw-Bun binary and fails the
+build** (via Bun's help banner / its `<x.y.z>+<hash>` version string). This also
+makes the [CI update workflow](.github/workflows/update.yml) **refuse to bump
+`release.json` to a mis-built release** — the build only goes green once a real
+`claude-science` binary is published upstream, at which point this package works
+with no further changes. In Claude Code, this class of regression has always
+been corrected in a subsequent patch release, so a fixed `linux-x64` build is
+expected; there is no ETA.
+
+Until then, `nix build` / `nix run` / `nix profile install` will fail by design
+on `x86_64-linux`. (macOS is distributed as a `.app` via DMG and is out of scope
+for this flake.)
+
 ## What this is
 
 Anthropic distributes `claude-science` via a shell installer
@@ -34,6 +76,9 @@ v0.1.15): it's a normal dynamically-linked glibc ELF executable
 `libc`/`libpthread`/`libdl`/`libm`) — not an Electron app, and not
 distributed via a macOS-DMG-extraction hack the way Claude Desktop on
 Linux currently is. `autoPatchelfHook` is sufficient to make it run.
+(As noted in the status section above, the v0.1.15 artifact currently
+"runs" only as the Bun runtime it was compiled with — the ELF patching is
+correct; the upstream payload is not the app.)
 
 ## Usage
 
