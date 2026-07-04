@@ -1,0 +1,53 @@
+name: update
+
+on:
+  schedule:
+    # Hourly, offset from the hour to avoid thundering-herd on Anthropic's
+    # distribution endpoint at :00.
+    - cron: "17 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Resolve latest release
+        run: ./scripts/update.sh
+
+      - name: Check for changes
+        id: diff
+        run: |
+          if git diff --quiet -- release.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: cachix/install-nix-action@v27
+        if: steps.diff.outputs.changed == 'true'
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Build to verify the new hashes actually resolve
+        if: steps.diff.outputs.changed == 'true'
+        run: nix build .#default -L
+
+      - name: Commit and push
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          version=$(jq -r .version release.json)
+          sha8=$(jq -r .sha8 release.json)
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add release.json
+          git commit -m "chore: update claude-science to ${version} (${sha8})"
+          git push

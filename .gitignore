@@ -1,0 +1,7 @@
+# Nix build outputs
+result
+result-*
+
+# Claude Code local session settings
+.claude/settings.local.json
+.claude/settings.local.json.tmp.*

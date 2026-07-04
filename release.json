@@ -1,0 +1,9 @@
+{
+  "version": "0.1.15",
+  "sha8": "aa553de7",
+  "sha256": {
+    "x86_64-linux": "a5c966b3d07fb3e4460522d30b962c43eff7b6e15746defe0f37473b9df0a3d3",
+    "aarch64-darwin": "1aedf014814f7c7295913b898cddf319f61d462ea8080a7bdfbb9cc06c9a384e",
+    "x86_64-darwin": "e04234592b4fcdff1b60ea62c3628ee211f2e92cacbe2bad2c81d6976bfa3c19"
+  }
+}
