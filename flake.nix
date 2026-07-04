@@ -91,11 +91,22 @@
           # args. This keeps the sandbox (and its default-deny network / file
           # approval model) intact, unlike --dangerously-no-sandbox.
           #
-          # Prepending is safe here precisely because the app never binds /nix
-          # or /run itself (that is the whole bug), so our early binds can't be
-          # shadowed by a later parent bind. If CLAUDE_SCIENCE_BWRAP_LOG is set,
-          # the raw invocation is appended there first, to diagnose cases where
-          # a different bind position or path is needed.
+          # The binds cover the three NixOS indirections the app's FHS-only
+          # bind list omits:
+          #   /nix/store          -- every executable + its glibc/loader
+          #   /run/current-system -- the $SHELL path (/run/.../sw/bin/bash)
+          #   /etc/static         -- the symlink farm nearly all of NixOS's
+          #                          /etc points into; without it e.g.
+          #                          /etc/ssl/certs/ca-certificates.crt is a
+          #                          dangling link inside the sandbox and TLS
+          #                          (conda/micromamba, connectors) fails.
+          #
+          # Prepending is safe here precisely because the app never binds /nix,
+          # /run or /etc/static itself (that is the whole bug), so our early
+          # binds can't be shadowed by a later parent bind. If
+          # CLAUDE_SCIENCE_BWRAP_LOG is set, the raw invocation is appended
+          # there first, to diagnose cases where a different bind position or
+          # path is needed.
           bwrapShim = pkgs.writeShellScriptBin "bwrap" ''
             if [ -n "''${CLAUDE_SCIENCE_BWRAP_LOG:-}" ]; then
               { printf '%q ' "$@"; echo; } >> "$CLAUDE_SCIENCE_BWRAP_LOG" 2>/dev/null || true
@@ -104,6 +115,7 @@
               --ro-bind /nix/store /nix/store \
               --ro-bind-try /run/current-system /run/current-system \
               --ro-bind-try /run/opengl-driver /run/opengl-driver \
+              --ro-bind-try /etc/static /etc/static \
               "$@"
           '';
 
