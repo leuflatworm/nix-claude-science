@@ -76,6 +76,41 @@
           # asar patching is needed (unlike Claude Desktop on Linux).
           runtimeDeps = lib.optionals isLinux [ pkgs.bubblewrap pkgs.socat ];
 
+          # NixOS sandbox fix. claude-science runs code-exec kernels inside its
+          # own bubblewrap sandbox, and that bwrap invocation binds only FHS
+          # dirs (/usr, /bin, /lib, ...) into the namespace -- never /nix/store
+          # or /run/current-system. On NixOS every executable and its glibc/
+          # dynamic-loader live under /nix/store, so nothing is reachable inside
+          # the sandbox and kernels die with:
+          #   bwrap: execvp /run/current-system/sw/bin/bash: No such file or directory
+          # (confirmed 2026-07-04 even with those paths present on the host).
+          #
+          # We can't patch the upstream binary, but it locates `bwrap` via the
+          # PATH we inject in postFixup -- so we shadow bwrap with this shim,
+          # which prepends the missing read-only binds before the app's own
+          # args. This keeps the sandbox (and its default-deny network / file
+          # approval model) intact, unlike --dangerously-no-sandbox.
+          #
+          # Prepending is safe here precisely because the app never binds /nix
+          # or /run itself (that is the whole bug), so our early binds can't be
+          # shadowed by a later parent bind. If CLAUDE_SCIENCE_BWRAP_LOG is set,
+          # the raw invocation is appended there first, to diagnose cases where
+          # a different bind position or path is needed.
+          bwrapShim = pkgs.writeShellScriptBin "bwrap" ''
+            if [ -n "''${CLAUDE_SCIENCE_BWRAP_LOG:-}" ]; then
+              { printf '%q ' "$@"; echo; } >> "$CLAUDE_SCIENCE_BWRAP_LOG" 2>/dev/null || true
+            fi
+            exec ${pkgs.bubblewrap}/bin/bwrap \
+              --ro-bind /nix/store /nix/store \
+              --ro-bind-try /run/current-system /run/current-system \
+              --ro-bind-try /run/opengl-driver /run/opengl-driver \
+              "$@"
+          '';
+
+          # What actually goes on claude-science's PATH: the shim (as `bwrap`)
+          # instead of raw bubblewrap, plus socat for the sandbox net bridge.
+          wrapperDeps = lib.optionals isLinux [ bwrapShim pkgs.socat ];
+
         in
         {
           packages.default = pkgs.stdenv.mkDerivation {
@@ -109,7 +144,7 @@
             postFixup =
               if isLinux then ''
                 wrapProgram $out/bin/.claude-science-unwrapped \
-                  --prefix PATH : ${lib.makeBinPath runtimeDeps}
+                  --prefix PATH : ${lib.makeBinPath wrapperDeps}
                 mv $out/bin/.claude-science-unwrapped $out/bin/claude-science
               '' else ''
                 mv $out/bin/.claude-science-unwrapped $out/bin/claude-science
