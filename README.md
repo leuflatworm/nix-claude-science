@@ -11,47 +11,46 @@ scientific AI workbench (released as a beta on 2026-06-30).
 > not alter, extract, or reimplement any part of Claude Science's
 > authentication, networking, or sandboxing behavior.
 
-## ⚠️ Current status: upstream `linux-x64` release is broken (as of 2026-07-04)
+## Packaging note: `dontStrip` is required (Bun single-file payload)
 
-**The `operon-linux-x64` binary Anthropic currently publishes for
-`claude-science` v0.1.15 is the raw [Bun](https://bun.sh) runtime, not the
-Claude Science CLI.** Running it just drops you into Bun's own command line:
+`claude-science` is a [Bun](https://bun.sh) `--compile` single-file
+executable: the application bundle is appended **after** the ELF and located
+via a trailer at end-of-file. stdenv's default `fixup` strips ELF binaries,
+which rewrites/truncates the file and drops that appended payload. A stripped
+`claude-science` then silently degrades to the **bare Bun runtime** —
+`--version` prints Bun's `1.3.13`, `--help` prints Bun's CLI, and every
+subcommand is Bun's:
+
+```console
+# what a STRIPPED (broken) build does — this flake sets dontStrip to prevent it:
+$ claude-science --version
+1.3.13                         # Bun's version, not claude-science's
+$ claude-science --help
+Bun is a fast JavaScript runtime, package manager, bundler, and test runner. ...
+```
+
+So `flake.nix` sets **`dontStrip = true;`** (`autoPatchelfHook`'s
+set-interpreter/set-rpath is fine — only `strip` corrupts the payload). With
+that, the build produces the real CLI:
 
 ```console
 $ claude-science --version
-1.3.13                         # <- Bun's version, not claude-science's
+claude-science 0.1.15-dev.20260701.t220242.shaaa553de (release, public)
 $ claude-science --help
-Bun is a fast JavaScript runtime, package manager, bundler, and test runner. ...
-$ claude-science login
-Uh-oh. bun login is a subcommand reserved for future use by Bun.
+claude-science — run Claude on your data, locally, in your browser
 ```
 
-`claude-science` is a Bun-compiled single-file executable. In a correct build,
-the app launcher is embedded into the Bun binary; here it isn't, so Bun falls
-through to its own argument parser. This is a **known upstream `area:packaging`
-regression** that has hit the sibling [Claude Code](https://github.com/anthropics/claude-code)
-project more than once — the binary boots into Bun's CLI instead of the app:
+As a backstop, `installCheckPhase` **fails the build if the packaged binary
+ever runs as bare Bun again** (detected via Bun's help banner / its
+`<x.y.z>+<hash>` version string), so a future regression that re-strips or
+otherwise truncates the payload can't silently ship a non-functional command.
 
-- [anthropics/claude-code#28325](https://github.com/anthropics/claude-code/issues/28325)
-  — Linux, `claude` 2.1.52 "only runs bun" (worked in 2.1.51)
-- [anthropics/claude-code#63402](https://github.com/anthropics/claude-code/issues/63402)
-  — auto-update shipped a binary that boots into Bun's CLI (`InternalName: bun`)
-
-**This is an upstream defect, not a bug in this flake** — the fetch, checksum
-verification, and patching are all correct; the artifact upstream serves is
-simply the wrong binary. To avoid silently installing a non-functional command,
-`flake.nix`'s `installCheckPhase` **detects the raw-Bun binary and fails the
-build** (via Bun's help banner / its `<x.y.z>+<hash>` version string). This also
-makes the [CI update workflow](.github/workflows/update.yml) **refuse to bump
-`release.json` to a mis-built release** — the build only goes green once a real
-`claude-science` binary is published upstream, at which point this package works
-with no further changes. In Claude Code, this class of regression has always
-been corrected in a subsequent patch release, so a fixed `linux-x64` build is
-expected; there is no ETA.
-
-Until then, `nix build` / `nix run` / `nix profile install` will fail by design
-on `x86_64-linux`. (macOS is distributed as a `.app` via DMG and is out of scope
-for this flake.)
+> Historical note: the same "boots into Bun's CLI" symptom has appeared
+> upstream in the sibling Claude Code project as a genuine build regression
+> ([anthropics/claude-code#28325](https://github.com/anthropics/claude-code/issues/28325),
+> [#63402](https://github.com/anthropics/claude-code/issues/63402)). Here,
+> though, the cause was local — stripping a good upstream binary — not a bad
+> upstream artifact.
 
 ## What this is
 
@@ -75,10 +74,9 @@ v0.1.15): it's a normal dynamically-linked glibc ELF executable
 (`interpreter /lib64/ld-linux-x86-64.so.2`, depending only on
 `libc`/`libpthread`/`libdl`/`libm`) — not an Electron app, and not
 distributed via a macOS-DMG-extraction hack the way Claude Desktop on
-Linux currently is. `autoPatchelfHook` is sufficient to make it run.
-(As noted in the status section above, the v0.1.15 artifact currently
-"runs" only as the Bun runtime it was compiled with — the ELF patching is
-correct; the upstream payload is not the app.)
+Linux currently is. `autoPatchelfHook` is sufficient to make it run — but
+see the packaging note above: it must be paired with `dontStrip = true` so
+the appended Bun application payload survives the build.
 
 ## Usage
 

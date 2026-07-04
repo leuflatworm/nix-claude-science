@@ -75,6 +75,18 @@
             inherit src;
             dontUnpack = true;
 
+            # CRITICAL: claude-science is a Bun `--compile` single-file
+            # executable -- the application bundle is appended AFTER the ELF and
+            # located via a trailer at end-of-file. stdenv's default fixup strips
+            # the ELF, which rewrites/truncates it and drops that appended
+            # payload; the binary then silently degrades to the bare Bun runtime
+            # (`--version` reports Bun's 1.3.13, `--help` prints Bun's CLI). Bun
+            # standalone binaries are also already stripped upstream, so there is
+            # nothing to gain here. Confirmed 2026-07-04: `strip` alone turns the
+            # working v0.1.15 binary into raw Bun. autoPatchelfHook's
+            # set-interpreter/set-rpath does NOT harm the payload; only strip does.
+            dontStrip = true;
+
             nativeBuildInputs =
               lib.optionals isLinux [ pkgs.autoPatchelfHook ] ++ [ pkgs.makeWrapper ];
             buildInputs = lib.optionals isLinux [ pkgs.stdenv.cc.cc.lib ];
@@ -101,40 +113,30 @@
             installCheckPhase = ''
               runHook preInstallCheck
 
-              # claude-science is a Bun-compiled single-file executable. Upstream
-              # has, more than once, shipped the RAW Bun runtime instead of the
-              # app-embedded binary: with the launcher not embedded, Bun falls
-              # through to its own CLI, so the "binary" is just `bun`. This is a
-              # known area:packaging regression in the sibling claude-code project
-              # (anthropics/claude-code#28325 on linux, #63402 on windows), and it
-              # is exactly the state of operon-linux-x64 v0.1.15 as of 2026-07-04.
-              #
-              # A raw-Bun build still exits 0 on `--version`, so a naive smoke test
-              # passes and silently installs a non-functional CLI. Detect it
-              # explicitly and FAIL the build instead -- this also makes the CI
-              # update workflow refuse to bump release.json to a mis-built upstream
-              # release, and only go green once a real app binary is published.
+              # Regression guard for the Bun single-file payload (see dontStrip
+              # above). If the appended application bundle is ever lost -- e.g. a
+              # future change re-enables strip, or a fixup step rewrites the ELF
+              # and truncates the trailer -- the binary silently degrades to the
+              # bare Bun runtime: `--version` prints Bun's "<x.y.z>+<hash>" and
+              # `--help` prints Bun's CLI. That still exits 0, so a naive smoke
+              # test would pass and ship a non-functional `claude-science`. Detect
+              # the degraded state explicitly and FAIL the build instead.
               help="$($out/bin/claude-science --help 2>&1 || true)"
               ver="$($out/bin/claude-science --version 2>&1 || true)"
               echo "claude-science --version -> $ver"
 
-              # Signal 1: Bun's help banner is unmistakable and app-specific text
-              # will never contain it.
+              # Signal 1: Bun's help banner is unmistakable; the real CLI's help
+              # ("run Claude on your data ...") never contains it.
               # Signal 2: Bun reports a "<x.y.z>+<hash>" version; the real CLI
-              # reports the manifest version ("$version", e.g. 0.1.15) with no +hash.
+              # reports the manifest version ("$version", e.g. 0.1.15).
               if printf '%s' "$help" | grep -qiE 'Bun is a fast JavaScript runtime' \
                  || printf '%s' "$ver" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\+[0-9a-f]+$'; then
                 echo "" >&2
-                echo "ERROR: upstream release $version (operon-${platform}) is a raw Bun" >&2
-                echo "runtime, NOT the claude-science CLI -- running it drops into Bun's" >&2
-                echo "own command line. This is the known area:packaging regression from" >&2
-                echo "anthropics/claude-code#28325 / #63402 (the launcher was not embedded" >&2
-                echo "into the Bun single-file executable). Refusing to package a build" >&2
-                echo "that would install a non-functional 'claude-science' command." >&2
-                echo "" >&2
-                echo "This is an upstream defect, not a packaging bug here: wait for a" >&2
-                echo "corrected release (scripts/update.sh will pick it up) or pin an older" >&2
-                echo "known-good sha8 in release.json." >&2
+                echo "ERROR: the packaged claude-science ($version, operon-${platform})" >&2
+                echo "runs as the bare Bun runtime, not the CLI -- the Bun-compiled" >&2
+                echo "payload was lost during the build (almost always a strip step" >&2
+                echo "rewriting the ELF; keep dontStrip = true). Refusing to install a" >&2
+                echo "non-functional 'claude-science' command." >&2
                 exit 1
               fi
 
