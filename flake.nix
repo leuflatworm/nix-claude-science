@@ -101,12 +101,12 @@
           #                          dangling link inside the sandbox and TLS
           #                          (conda/micromamba, connectors) fails.
           #
-          # Prepending is safe here precisely because the app never binds /nix,
-          # /run or /etc/static itself (that is the whole bug), so our early
-          # binds can't be shadowed by a later parent bind. If
-          # CLAUDE_SCIENCE_BWRAP_LOG is set, the raw invocation is appended
-          # there first, to diagnose cases where a different bind position or
-          # path is needed.
+          # The app builds a fresh /etc via `--tmpfs /etc`, which shadows any
+          # /etc bind we merely prepend -- so the shim splices our binds in
+          # right before the literal `--` that terminates bwrap's options
+          # (confirmed present in the real invocation), making them apply after
+          # the app's own binds. The raw invocation is always logged to
+          # /tmp/claude-science-bwrap.log (override via CLAUDE_SCIENCE_BWRAP_LOG).
           bwrapShim = pkgs.writeShellScriptBin "bwrap" ''
             # Always record the raw invocation to a fixed path (env can
             # override) so the sandbox construction can be inspected even when
@@ -129,12 +129,37 @@
               export NODE_EXTRA_CA_CERTS="''${NODE_EXTRA_CA_CERTS:-$_ca}"
             fi
 
-            exec ${pkgs.bubblewrap}/bin/bwrap \
-              --ro-bind /nix/store /nix/store \
-              --ro-bind-try /run/current-system /run/current-system \
-              --ro-bind-try /run/opengl-driver /run/opengl-driver \
-              --ro-bind-try /etc/static /etc/static \
-              "$@"
+            # The NixOS binds we must add. /run/current-system fixes the $SHELL
+            # path; /etc/static reconnects NixOS's /etc symlink farm (CA certs
+            # live there). /nix/store is usually redundant (the app binds /nix
+            # itself) but kept for hosts where it doesn't.
+            extra=(
+              --ro-bind /nix/store /nix/store
+              --ro-bind-try /run/current-system /run/current-system
+              --ro-bind-try /run/opengl-driver /run/opengl-driver
+              --ro-bind-try /etc/static /etc/static
+            )
+
+            # The app builds a fresh /etc with `--tmpfs /etc`, which shadows any
+            # /etc bind we merely PREPEND. But it terminates bwrap options with
+            # a literal `--` before the command, so we splice our binds in right
+            # before that `--`: they then apply AFTER the app's --tmpfs /etc and
+            # win. If no `--` is present we fall back to prepending.
+            args=()
+            spliced=0
+            for a in "$@"; do
+              if [ "$spliced" = 0 ] && [ "$a" = "--" ]; then
+                args+=( "''${extra[@]}" -- )
+                spliced=1
+              else
+                args+=( "$a" )
+              fi
+            done
+            if [ "$spliced" = 0 ]; then
+              args=( "''${extra[@]}" "$@" )
+            fi
+
+            exec ${pkgs.bubblewrap}/bin/bwrap "''${args[@]}"
           '';
 
           # What actually goes on claude-science's PATH: the shim (as `bwrap`)
