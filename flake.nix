@@ -83,8 +83,18 @@
           # /bin and /usr/bin are (near-)empty -- envfs doesn't help inside the
           # sandbox because it resolves via the *calling* process's PATH, which
           # in-sandbox lacks /run/current-system/sw/bin -- so we bind this env
-          # over them for the real sandbox call. Python is intentionally
-          # omitted: kernels get python from the app's own conda envs.
+          # over them for the real sandbox call.
+          #
+          # python3 is REQUIRED here, not just convenient: data-plane kernels
+          # get python from the app's conda envs, but the control-plane
+          # operon-kernel (repl / MCP & skill management) hard-execs the FHS
+          # system interpreter and dies without it --
+          #   operon-kernel: interpreter /usr/bin/python3 not found or not
+          #   executable (set [conda].operon_python_bin)   [exit code 72]
+          # Nix's python3 at /usr/bin/python3 reproduces exactly what that
+          # path is on an FHS distro: a plain system python, stdlib only.
+          # (config.toml's [conda].operon_python_bin exists as an escape hatch
+          # but isn't needed with this bind.)
           sandboxTools = pkgs.buildEnv {
             name = "claude-science-sandbox-tools";
             paths = with pkgs; [
@@ -103,6 +113,7 @@
               which
               git
               curl
+              python3
             ];
             pathsToLink = [ "/bin" ];
             postBuild = ''
