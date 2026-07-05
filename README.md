@@ -164,6 +164,7 @@ rewrites the sandbox's bind list. Layer by layer:
 | 4 | The `--disable-userns` capability probe breaks if binds are spliced into its read-only root | shim detects the probe (no `--tmpfs /etc`) and only prepends there (flake) |
 | 5 | `/bin` & `/usr/bin` are near-empty in the sandbox → no `sh`, `mkdir`, `tar`, `git`, ... (kernel setup and `edit_file` fail) | shim binds a curated `buildEnv` (bash, coreutils, grep/sed/awk, tar/gzip/xz/zstd, git, curl, ...) over `/bin` and `/usr/bin` (flake) |
 | 6 | Runtime-downloaded `micromamba` is a generic-Linux ELF expecting `/lib64/ld-linux-x86-64.so.2` | `programs.nix-ld.enable` (NixOS module) |
+| 7 | `sharp` (image processing) is a prebuilt `.node` module dlopen'd at runtime; its `libstdc++.so.6` can't resolve — autoPatchelf can't reach a runtime-unpacked file, nix-ld doesn't intercept `dlopen`, and `DT_RUNPATH` isn't consulted for dlopen'd objects' deps | append gcc's lib dir and convert the executable's RUNPATH → `RPATH` (`patchelf --force-rpath`), which **is** in every dlopen's search scope — process-local, no `LD_LIBRARY_PATH` leaking into sandbox kernels (flake) |
 
 The shim never weakens the sandbox's security model: network stays
 default-deny behind the app's socat proxy with per-host approval cards,
@@ -173,10 +174,6 @@ local process).
 
 For debugging, the shim logs every raw bwrap invocation to
 `/tmp/claude-science-bwrap.log` (override with `CLAUDE_SCIENCE_BWRAP_LOG`).
-
-Known cosmetic issue: the daemon's optional `sharp` image module fails to
-load (`libstdc++.so.6` not found on the *host* side) — image processing is
-disabled but nothing else is affected.
 
 The sandbox also needs the kernel to permit unprivileged user namespaces.
 This is on by default on most NixOS configurations, but if you're running

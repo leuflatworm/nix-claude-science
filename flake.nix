@@ -265,6 +265,36 @@
                 mv $out/bin/.claude-science-unwrapped $out/bin/claude-science
               '';
 
+            # sharp (the daemon's optional image-processing backend) is a
+            # prebuilt .node module that claude-science unpacks at RUNTIME and
+            # dlopen()s into itself; it needs libstdc++.so.6. On NixOS nothing
+            # can resolve that for it:
+            #   - autoPatchelf can't patch a file that doesn't exist at build
+            #     time;
+            #   - nix-ld only intercepts exec() of programs using its stub
+            #     loader -- this is a dlopen() inside a process already running
+            #     on the real (patched-in) glibc loader;
+            #   - the main binary's DT_RUNPATH is NOT consulted when resolving
+            #     dependencies of dlopen'd objects (RUNPATH is non-transitive).
+            # But the executable's DT_RPATH IS part of the search scope for
+            # every object in the process -- so append gcc's lib dir and
+            # convert RUNPATH -> RPATH (--force-rpath). This stays scoped to
+            # this one process: no LD_LIBRARY_PATH that would leak into
+            # sandbox kernels and shadow conda's own libstdc++.
+            #
+            # Runs in preInstallCheck because autoPatchelf executes as a
+            # postFixup *hook*, i.e. after the postFixup attribute above --
+            # this is the first spot where its RUNPATH result is final. The
+            # payload/version guard below then re-validates the rewritten ELF.
+            preInstallCheck = lib.optionalString isLinux ''
+              elf=$out/bin/..claude-science-unwrapped-wrapped
+              old="$(${pkgs.patchelf}/bin/patchelf --print-rpath "$elf")"
+              new=${lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib ]}
+              if [ -n "$old" ]; then new="$old:$new"; fi
+              ${pkgs.patchelf}/bin/patchelf --force-rpath --set-rpath "$new" "$elf"
+              echo "claude-science: forced RPATH -> $new"
+            '';
+
             # The sandbox (bubblewrap) is only invoked when claude-science
             # actually runs a job; unlike the installer, the Nix build
             # itself never needs bwrap/socat present at build time.
