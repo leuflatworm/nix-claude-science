@@ -80,16 +80,52 @@ the appended Bun application payload survives the build.
 
 ## Usage
 
+### NixOS (recommended): the flake's module
+
+Everything claude-science needs on the host is bundled into
+`nixosModules.default` — you should not need any other host-side settings
+(no `bash`/`coreutils`/`cacert` in `systemPackages`, no `envfs`, no
+`/bin/bash` symlink rules, no `SSL_CERT_FILE`, no global `allowUnfree`):
+
+```nix
+# flake.nix of your system config
+{
+  inputs.claude-science.url = "github:leuflatworm/nix-claude-science";
+
+  outputs = { nixpkgs, claude-science, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        ./configuration.nix
+        claude-science.nixosModules.default   # ← this line
+      ];
+    };
+  };
+}
+```
+
+The module installs the package and enables
+[`nix-ld`](https://github.com/nix-community/nix-ld) (claude-science
+downloads `micromamba` — a generic-Linux binary — at runtime, and nix-ld
+provides the `/lib64/ld-linux-x86-64.so.2` loader it expects).
+
+Then:
+
+```bash
+claude-science serve --no-browser   # headless; open the printed login URL
+claude-science url                  # fresh single-use login link (~3 min)
+```
+
+### Other ways
+
 ```bash
 # Run without installing
 nix run github:leuflatworm/nix-claude-science
 
 # Install into your profile
 nix profile install github:leuflatworm/nix-claude-science
-
-# Or add to a flake-based NixOS/Home Manager config
-inputs.claude-science.url = "github:leuflatworm/nix-claude-science";
-# ... then reference inputs.claude-science.packages.${system}.default
+# (non-NixOS-module installs still need programs.nix-ld.enable = true,
+#  or an FHS distro, for the runtime-downloaded micromamba)
 ```
 
 A `devShell` is also provided (`nix develop`) that puts `bwrap` and
@@ -97,12 +133,50 @@ A `devShell` is also provided (`nix develop`) that puts `bwrap` and
 upstream installer script directly or for debugging sandbox startup
 issues in isolation.
 
-## Runtime requirements (Linux)
+## NixOS sandbox support: what this flake actually fixes
 
-`claude-science` spawns a [bubblewrap](https://github.com/containers/bubblewrap)
-sandbox for code execution, and uses `socat` for the sandbox's network
-bridging. This flake wraps the binary so both are on `PATH` automatically
-— you don't need to install them system-wide.
+**Status: working end-to-end on NixOS with the sandbox ENABLED**
+(verified 2026-07-05, v0.1.15: conda env creation, pip/conda package
+installs, all bundled stdio MCP connectors, kernels). No
+`--dangerously-no-sandbox` needed.
+
+Upstream claude-science runs its code-exec kernels inside a
+[bubblewrap](https://github.com/containers/bubblewrap) sandbox whose bind
+list assumes an FHS distro: it binds `/usr`, `/bin`, `/lib64`, rebuilds
+`/etc` from a `--tmpfs`, and re-binds a hand-picked set of `/etc` entries
+(`/etc/ssl`, `/etc/passwd`, ...). On NixOS nearly all of that is empty or
+a dangling symlink, so out of the box every kernel dies with errors like:
+
+```
+bwrap: execvp /run/current-system/sw/bin/bash: No such file or directory
+error    libmamba No CA certificates found on system, aborting
+```
+
+This flake fixes that **inside the package** — the binary locates `bwrap`
+via the `PATH` its wrapper injects, so we shadow it with a shim that
+rewrites the sandbox's bind list. Layer by layer:
+
+| # | Problem on NixOS | Fix (where) |
+|---|---|---|
+| 1 | `strip` destroys the Bun single-file payload → binary degrades to bare Bun | `dontStrip` + install-check guard (flake) |
+| 2 | Sandbox can't reach `/nix/store` / `/run/current-system` → no shell, no libs | bwrap shim adds `--ro-bind`s (flake) |
+| 3 | `--tmpfs /etc` orphans NixOS's `/etc/static` symlink farm → CA certs dangle, TLS fails | shim splices `/etc/static` bind **after** the app's own binds, just before bwrap's `--` terminator (flake) |
+| 4 | The `--disable-userns` capability probe breaks if binds are spliced into its read-only root | shim detects the probe (no `--tmpfs /etc`) and only prepends there (flake) |
+| 5 | `/bin` & `/usr/bin` are near-empty in the sandbox → no `sh`, `mkdir`, `tar`, `git`, ... (kernel setup and `edit_file` fail) | shim binds a curated `buildEnv` (bash, coreutils, grep/sed/awk, tar/gzip/xz/zstd, git, curl, ...) over `/bin` and `/usr/bin` (flake) |
+| 6 | Runtime-downloaded `micromamba` is a generic-Linux ELF expecting `/lib64/ld-linux-x86-64.so.2` | `programs.nix-ld.enable` (NixOS module) |
+
+The shim never weakens the sandbox's security model: network stays
+default-deny behind the app's socat proxy with per-host approval cards,
+and file access still goes through approvals. The added binds are
+world-readable system paths (`/nix/store` is already readable by every
+local process).
+
+For debugging, the shim logs every raw bwrap invocation to
+`/tmp/claude-science-bwrap.log` (override with `CLAUDE_SCIENCE_BWRAP_LOG`).
+
+Known cosmetic issue: the daemon's optional `sharp` image module fails to
+load (`libstdc++.so.6` not found on the *host* side) — image processing is
+disabled but nothing else is affected.
 
 The sandbox also needs the kernel to permit unprivileged user namespaces.
 This is on by default on most NixOS configurations, but if you're running
@@ -114,19 +188,6 @@ boot.kernel.sysctl."kernel.unprivileged_userns_clone" = 1;
 
 (Check your actual kernel/config before assuming this is needed — don't
 add it speculatively.)
-
-## Known unknowns / not yet verified
-
-- **Sandbox internals on non-FHS systems.** Bubblewrap itself works fine
-  on NixOS (it's just namespaces), but if `claude-science`'s sandbox setup
-  hard-codes bind-mounts of typical FHS paths (e.g. `/usr`, `/lib`) for the
-  code it executes inside the sandbox, that could behave unexpectedly on
-  NixOS. This has not been tested end-to-end yet.
-- **How the ~5GB "starter" Python/R environments are built** on first run
-  is not documented publicly as of this writing, so whether that step
-  itself assumes an FHS layout is also unverified.
-- Please open an issue with what you find if you test this — this
-  packaging is new and those two points are the main open risk areas.
 
 ## Unsupported platforms (upstream, not a limitation of this flake)
 

@@ -76,6 +76,40 @@
           # asar patching is needed (unlike Claude Desktop on Linux).
           runtimeDeps = lib.optionals isLinux [ pkgs.bubblewrap pkgs.socat ];
 
+          # Base toolset served into the sandbox at /bin and /usr/bin (see the
+          # shim below). The app's kernels and its own setup scripts assume an
+          # FHS userland: /bin/sh -c 'mkdir -p ...', tar/gzip for unpacking,
+          # coreutils for its edit_file tool, git, etc. On NixOS the host's
+          # /bin and /usr/bin are (near-)empty -- envfs doesn't help inside the
+          # sandbox because it resolves via the *calling* process's PATH, which
+          # in-sandbox lacks /run/current-system/sw/bin -- so we bind this env
+          # over them for the real sandbox call. Python is intentionally
+          # omitted: kernels get python from the app's own conda envs.
+          sandboxTools = pkgs.buildEnv {
+            name = "claude-science-sandbox-tools";
+            paths = with pkgs; [
+              bashInteractive
+              coreutils
+              gnugrep
+              gnused
+              gawk
+              findutils
+              diffutils
+              gnutar
+              gzip
+              bzip2
+              xz
+              zstd
+              which
+              git
+              curl
+            ];
+            pathsToLink = [ "/bin" ];
+            postBuild = ''
+              ln -sfn bash $out/bin/sh
+            '';
+          };
+
           # NixOS sandbox fix. claude-science runs code-exec kernels inside its
           # own bubblewrap sandbox, and that bwrap invocation binds only FHS
           # dirs (/usr, /bin, /lib, ...) into the namespace -- never /nix/store
@@ -140,6 +174,16 @@
               --ro-bind-try /etc/static /etc/static
             )
 
+            # FHS userland for the sandbox: mounted over the (near-empty on
+            # NixOS) /bin and /usr/bin the app binds from the host, so kernel
+            # setup scripts and tools (sh, mkdir, tar, git, ...) resolve. Only
+            # added to the real sandbox call (splice branch below) -- probes
+            # don't need them.
+            toolbinds=(
+              --ro-bind ${sandboxTools}/bin /bin
+              --ro-bind ${sandboxTools}/bin /usr/bin
+            )
+
             # Strategy differs per call:
             #  * The REAL sandbox exec rebuilds /etc with `--tmpfs /etc`, which
             #    shadows any /etc bind we prepend -- so for that call we splice
@@ -164,7 +208,7 @@
               spliced=0
               for a in "$@"; do
                 if [ "$spliced" = 0 ] && [ "$a" = "--" ]; then
-                  args+=( "''${extra[@]}" -- )
+                  args+=( "''${extra[@]}" "''${toolbinds[@]}" -- )
                   spliced=1
                 else
                   args+=( "$a" )
@@ -280,5 +324,36 @@
           devShells.default = pkgs.mkShell {
             packages = runtimeDeps;
           };
-        });
+        })
+    // {
+      # One-stop NixOS integration: everything claude-science needs on the
+      # host, so consumers don't have to scatter settings across their
+      # configuration.nix. Usage (system flake):
+      #
+      #   modules = [ ./configuration.nix claude-science.nixosModules.default ];
+      #
+      # Host-side that is NOT needed (all handled inside this flake's bwrap
+      # shim / package): bash/coreutils/cacert in systemPackages, envfs,
+      # /bin/bash tmpfiles symlinks, SSL_CERT_FILE, allowUnfree.
+      nixosModules.default = { pkgs, lib, ... }: {
+        environment.systemPackages = [
+          self.packages.${pkgs.stdenv.hostPlatform.system}.default
+        ];
+
+        # claude-science downloads micromamba (a generic-Linux ELF expecting
+        # /lib64/ld-linux-x86-64.so.2) at runtime and runs it inside its
+        # sandbox; nix-ld provides that loader stub. The library list covers
+        # what conda-distributed binaries commonly dlopen. The daemon's env
+        # (NIX_LD*) propagates into the sandbox because the app does not
+        # --clearenv.
+        programs.nix-ld.enable = true;
+        programs.nix-ld.libraries = with pkgs; [
+          stdenv.cc.cc.lib
+          zlib
+          openssl
+          bzip2
+          xz
+        ];
+      };
+    };
 }
